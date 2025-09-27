@@ -21,7 +21,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 
-#define INITIAL_CLIP_STACK_SIZE 4
+
 
 static const D2D1_MATRIX_3X2_F identity =
 {{{
@@ -78,22 +78,6 @@ static void d2d_size_set(D2D1_SIZE_U *dst, float width, float height)
     dst->height = height;
 }
 
-static BOOL d2d_clip_stack_init(struct d2d_clip_stack *stack)
-{
-    if (!(stack->stack = malloc(INITIAL_CLIP_STACK_SIZE * sizeof(*stack->stack))))
-        return FALSE;
-
-    stack->size = INITIAL_CLIP_STACK_SIZE;
-    stack->count = 0;
-
-    return TRUE;
-}
-
-static void d2d_clip_stack_cleanup(struct d2d_clip_stack *stack)
-{
-    free(stack->stack);
-}
-
 static BOOL d2d_clip_stack_push(struct d2d_clip_stack *stack, const D2D1_RECT_F *rect)
 {
     D2D1_RECT_F r;
@@ -116,6 +100,15 @@ static void d2d_clip_stack_pop(struct d2d_clip_stack *stack)
     --stack->count;
 }
 
+static struct d2d_clip_stack* d2d_return_target_clip_stack(struct d2d_device_context *context) {
+    if (context->target.type != D2D_TARGET_BITMAP) {
+        ERR("Clip Stack is only on BITMAP target\n");
+        return NULL;
+    }
+    return &context->target.bitmap->clip_stack;
+}
+
+
 static void d2d_device_context_draw(struct d2d_device_context *render_target, enum d2d_shape_type shape_type,
         ID3D11Buffer *ib, unsigned int index_count, ID3D11Buffer *vb, unsigned int vb_stride,
         struct d2d_brush *brush, struct d2d_brush *opacity_brush)
@@ -128,6 +121,8 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     D3D11_RECT scissor_rect;
     unsigned int offset;
     D3D11_VIEWPORT vp;
+    struct d2d_clip_stack* clip_stack;
+    const D2D1_RECT_F *clip_rect;
 
     vp.TopLeftX = 0;
     vp.TopLeftY = 0;
@@ -152,11 +147,13 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     ID3D11DeviceContext1_PSSetConstantBuffers(context, 0, 1, &ps_cb);
     ID3D11DeviceContext1_PSSetShader(context, render_target->ps, NULL, 0);
     ID3D11DeviceContext1_RSSetViewports(context, 1, &vp);
-    if (render_target->clip_stack.count)
-    {
-        const D2D1_RECT_F *clip_rect;
 
-        clip_rect = &render_target->clip_stack.stack[render_target->clip_stack.count - 1];
+    clip_stack = d2d_return_target_clip_stack(render_target);
+    if (clip_stack && clip_stack->count)
+    {
+        TRACE("Draw - active clip!\n");
+
+        clip_rect = &clip_stack->stack[clip_stack->count - 1];
         scissor_rect.left = ceilf(clip_rect->left - 0.5f);
         scissor_rect.top = ceilf(clip_rect->top - 0.5f);
         scissor_rect.right = ceilf(clip_rect->right - 0.5f);
@@ -164,11 +161,15 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     }
     else
     {
+        TRACE("Draw - no active clip!\n");
         scissor_rect.left = 0.0f;
         scissor_rect.top = 0.0f;
         scissor_rect.right = render_target->pixel_size.width;
         scissor_rect.bottom = render_target->pixel_size.height;
     }
+
+    TRACE("%ld,%ld %ld,%ld\n",scissor_rect.left,scissor_rect.top,scissor_rect.right,scissor_rect.bottom);
+
     ID3D11DeviceContext1_RSSetScissorRects(context, 1, &scissor_rect);
     ID3D11DeviceContext1_RSSetState(context, render_target->rs);
     ID3D11DeviceContext1_OMSetRenderTargets(context, 1, &render_target->target.bitmap->rtv, NULL);
@@ -269,7 +270,6 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
     {
         unsigned int i, j, k;
 
-        d2d_clip_stack_cleanup(&context->clip_stack);
         IDWriteRenderingParams_Release(context->default_text_rendering_params);
         if (context->text_rendering_params)
             IDWriteRenderingParams_Release(context->text_rendering_params);
@@ -1869,8 +1869,15 @@ static void STDMETHODCALLTYPE d2d_device_context_PushAxisAlignedClip(ID2D1Device
 
     TRACE("iface %p, clip_rect %s, antialias_mode %#x.\n", iface, debug_d2d_rect_f(clip_rect), antialias_mode);
 
-    if (context->target.type == D2D_TARGET_COMMAND_LIST)
+    if (context->target.type == D2D_TARGET_COMMAND_LIST) {
         d2d_command_list_push_clip(context->target.command_list, clip_rect, antialias_mode);
+        return;
+    }
+
+    if (context->target.type != D2D_TARGET_BITMAP) {
+        ERR("PushAxisAlignedClip supports only BITMAP target\n");
+        return;
+    }
 
     if (antialias_mode != D2D1_ANTIALIAS_MODE_ALIASED)
         FIXME("Ignoring antialias_mode %#x.\n", antialias_mode);
@@ -1890,7 +1897,7 @@ static void STDMETHODCALLTYPE d2d_device_context_PushAxisAlignedClip(ID2D1Device
             clip_rect->right * x_scale, clip_rect->bottom * y_scale);
     d2d_rect_expand(&transformed_rect, &point);
 
-    if (!d2d_clip_stack_push(&context->clip_stack, &transformed_rect))
+    if (!d2d_clip_stack_push(d2d_return_target_clip_stack(context), &transformed_rect))
         WARN("Failed to push clip rect.\n");
 }
 
@@ -1900,10 +1907,16 @@ static void STDMETHODCALLTYPE d2d_device_context_PopAxisAlignedClip(ID2D1DeviceC
 
     TRACE("iface %p.\n", iface);
 
-    if (context->target.type == D2D_TARGET_COMMAND_LIST)
+    if (context->target.type == D2D_TARGET_COMMAND_LIST) {
         d2d_command_list_pop_clip(context->target.command_list);
+        return;
+    }
+    if (context->target.type != D2D_TARGET_BITMAP) {
+        ERR("PopAxisAlignedClip supports only BITMAP target\n");
+        return;
+    }
 
-    d2d_clip_stack_pop(&context->clip_stack);
+    d2d_clip_stack_pop(d2d_return_target_clip_stack(context));
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *iface, const D2D1_COLOR_F *colour)
@@ -4302,12 +4315,6 @@ static HRESULT d2d_device_context_init(struct d2d_device_context *render_target,
 
     render_target->drawing_state.transform = identity;
 
-    if (!d2d_clip_stack_init(&render_target->clip_stack))
-    {
-        WARN("Failed to initialize clip stack.\n");
-        hr = E_FAIL;
-        goto err;
-    }
 
     render_target->desc.dpiX = 96.0f;
     render_target->desc.dpiY = 96.0f;
