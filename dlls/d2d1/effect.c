@@ -1804,6 +1804,25 @@ static HRESULT __stdcall scale_factory(IUnknown **effect)
     return d2d_effect_create_impl(effect, &properties, sizeof(properties));
 }
 
+static const WCHAR tint_description[] =
+L"<?xml version='1.0'?>                                                   \
+  <Effect>                                                                \
+    <Property name='DisplayName' type='string' value='Tint'/>             \
+    <Property name='Author'      type='string' value='The Wine Project'/> \
+    <Property name='Category'    type='string' value='Stub'/>             \
+    <Property name='Description' type='string' value='Tint'/>             \
+    <Inputs >                                                             \
+      <Input name='Source'/>                                              \
+    </Inputs>                                                             \
+    <Property name='ColorD2D1_TINT_PROP_COLOR' type='vector4' />          \
+    <Property name='ClampOutputD2D1_TINT_PROP_CLAMP_OUTPUT' type='bool' />\
+  </Effect>";
+
+static HRESULT __stdcall tint_factory(IUnknown **effect)
+{
+    return d2d_effect_create_impl(effect, NULL, 0);
+}
+
 void d2d_effects_init_builtins(struct d2d_factory *factory)
 {
     static const struct builtin_description
@@ -1835,6 +1854,7 @@ void d2d_effects_init_builtins(struct d2d_factory *factory)
         { &CLSID_D2D1HueRotation, X2(hue_rotation) },
         { &CLSID_D2D1Saturation, X2(saturation) },
         { &CLSID_D2D1Scale, X2(scale) },
+        { &CLSID_D2D1Tint, X(tint) },
 #undef X2
 #undef X
     };
@@ -3489,7 +3509,16 @@ HRESULT d2d_effect_create(struct d2d_device_context *context, const CLSID *effec
 
     *effect = &object->ID2D1Effect_iface;
 
-    TRACE("Created effect %p.\n", *effect);
+    object->effect_id = *effect_id;
+    TRACE("Created effect %s %p.\n", wine_dbgstr_guid(effect_id), *effect);
 
     return S_OK;
+}
+
+struct d2d_effect *unsafe_impl_from_ID2D1Effect(ID2D1Effect *iface)
+{
+    if (!iface)
+        return NULL;
+    assert(iface->lpVtbl == (ID2D1EffectVtbl *)&d2d_effect_vtbl);
+    return CONTAINING_RECORD(iface, struct d2d_effect, ID2D1Effect_iface);
 }
