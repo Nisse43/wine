@@ -2706,27 +2706,39 @@ static NTSTATUS derive_key_hash( struct secret *secret, BCryptBufferDesc *desc, 
 {
     struct key_asymmetric_derive_key_params params;
     ULONG hash_len, derived_key_len = len_from_bitlen( secret->privkey->u.a.bitlen );
-    ULONG buffer_count = desc ? desc->cBuffers : 0;
+    ULONG prepend_len = 0, append_len = 0, total_len, off;
     UCHAR hash_buf[MAX_HASH_OUTPUT_BYTES];
     struct algorithm *alg = NULL;
-    ULONG secret_len = 0;
-    UCHAR *derived_key;
+    UCHAR *buf, *derived_key;
     NTSTATUS status;
     ULONG i;
 
-    for (i = 0; i < buffer_count; i++)
+    /* CNG specifies BCRYPT_KDF_HASH = Hash(prepend || secret || append).
+    * Wine used to hash only the shared secret and drop the
+    * KDF_SECRET_PREPEND / KDF_SECRET_APPEND buffers, which breaks callers
+    * that rely on them (e.g. Le Mans Ultimate's EOS/TLS join handshake). */
+    for (i = 0; i < (desc ? desc->cBuffers : 0); i++)
     {
-        if (desc->pBuffers[i].BufferType == KDF_HASH_ALGORITHM)
+        BCryptBuffer *b = desc->pBuffers + i;
+        if (b->BufferType == KDF_HASH_ALGORITHM)
         {
-            alg = get_hash_alg( desc->pBuffers + i, FALSE );
+            alg = get_hash_alg( b, FALSE );
             if (!alg) return STATUS_NOT_SUPPORTED;
         }
-        else if (desc->pBuffers[i].BufferType == KDF_SECRET_PREPEND) secret_len += desc->pBuffers[i].cbBuffer;
-        else FIXME( "buffer type %lu not supported\n", desc->pBuffers[i].BufferType );
+        else if (b->BufferType == KDF_SECRET_PREPEND)
+            prepend_len += b->cbBuffer;
+        else if (b->BufferType == KDF_SECRET_APPEND)
+            append_len += b->cbBuffer;
+        else
+            FIXME( "buffer type %lu not supported\n", b->BufferType );
     }
     if (!alg) alg = get_alg_object( BCRYPT_SHA1_ALG_HANDLE );
 
-    if (!(derived_key = malloc( derived_key_len + secret_len ))) return STATUS_NO_MEMORY;
+    /* Place the shared secret in the middle of [prepend || secret || append]
+    * so the whole concatenation can be hashed in a single pass. */
+    total_len = prepend_len + derived_key_len + append_len;
+    if (!(buf = malloc( total_len ))) return STATUS_NO_MEMORY;
+    derived_key = buf + prepend_len;
 
     params.privkey    = secret->privkey;
     params.pubkey     = secret->pubkey;
@@ -2735,28 +2747,35 @@ static NTSTATUS derive_key_hash( struct secret *secret, BCryptBufferDesc *desc, 
     params.ret_len    = ret_len;
     if ((status = UNIX_CALL( key_asymmetric_derive_key, &params )))
     {
-        free( derived_key );
+        free( buf );
         return status;
     }
-    derived_key_len = *params.ret_len;
 
-    if (secret_len)
+    /* Splice the prepend / append buffers around the now-known-length secret. */
+    for (i = 0, off = 0; i < (desc ? desc->cBuffers : 0); i++)
     {
-        memmove( derived_key + secret_len, derived_key, derived_key_len );
-
-        secret_len = 0;
-        for (i = 0; i < buffer_count; i++)
+        BCryptBuffer *b = desc->pBuffers + i;
+        if (b->BufferType == KDF_SECRET_PREPEND)
         {
-            if (desc->pBuffers[i].BufferType != KDF_SECRET_PREPEND) continue;
-            memcpy( derived_key + secret_len, desc->pBuffers[i].pvBuffer, desc->pBuffers[i].cbBuffer );
-            secret_len += desc->pBuffers[i].cbBuffer;
+            memcpy( buf + off, b->pvBuffer, b->cbBuffer );
+            off += b->cbBuffer;
         }
-        derived_key_len += secret_len;
+    }
+    off = prepend_len + *params.ret_len;
+    for (i = 0; i < (desc ? desc->cBuffers : 0); i++)
+    {
+        BCryptBuffer *b = desc->pBuffers + i;
+        if (b->BufferType == KDF_SECRET_APPEND)
+        {
+            memcpy( buf + off, b->pvBuffer, b->cbBuffer );
+            off += b->cbBuffer;
+        }
     }
 
     hash_len = builtin_algorithms[alg->id].hash_length;
     assert( hash_len <= sizeof(hash_buf) );
-    if (!(status = hash_single( alg, NULL, 0, derived_key, derived_key_len, hash_buf, hash_len )))
+    total_len = prepend_len + *params.ret_len + append_len;
+    if (!(status = hash_single( alg, NULL, 0, buf, total_len, hash_buf, hash_len )))
     {
         if (!output) *ret_len = hash_len;
         else
@@ -2766,7 +2785,7 @@ static NTSTATUS derive_key_hash( struct secret *secret, BCryptBufferDesc *desc, 
         }
     }
 
-    free( derived_key );
+    free( buf );
     return status;
 }
 
