@@ -1605,26 +1605,26 @@ static HRESULT d3dx_initialize_image_from_bmp(const void *src_data, uint32_t src
     (void)flags;
 
     if (src_data_size < sizeof(*file) + sizeof(*info))
-        return D3DX_ERROR_INVALID_DATA;
+        return D3DXERR_INVALIDDATA;
     if (file->bfType != 0x4d42)
-        return D3DX_ERROR_INVALID_DATA;
+        return D3DXERR_INVALIDDATA;
 
     data_offset = file->bfOffBits;
     if (data_offset >= src_data_size)
-        return D3DX_ERROR_INVALID_DATA;
+        return D3DXERR_INVALIDDATA;
 
     info = (const BITMAPINFOHEADER *)((const BYTE *)src_data + sizeof(*file));
     header_size = info->biSize;
     if (header_size < sizeof(*info) || (sizeof(*file) + header_size) > src_data_size)
-        return D3DX_ERROR_INVALID_DATA;
+        return D3DXERR_INVALIDDATA;
 
     if (info->biCompression != BI_RGB)
-        return D3DX_ERROR_INVALID_DATA;
+        return D3DXERR_INVALIDDATA;
 
     width = info->biWidth;
     height = info->biHeight;
     if (width <= 0 || height == 0)
-        return D3DX_ERROR_INVALID_DATA;
+        return D3DXERR_INVALIDDATA;
 
     bottom_up = height > 0;
     if (height < 0)
@@ -1635,12 +1635,12 @@ static HRESULT d3dx_initialize_image_from_bmp(const void *src_data, uint32_t src
     else if (info->biBitCount == 24)
         image->format = D3DX_PIXEL_FORMAT_B8G8R8_UNORM;
     else
-        return D3DX_ERROR_INVALID_DATA;
+        return D3DXERR_INVALIDDATA;
 
     row_pitch = ((width * info->biBitCount + 31) / 32) * 4;
     slice_pitch = row_pitch * height;
     if ((data_offset + slice_pitch) > src_data_size)
-        return D3DX_ERROR_INVALID_DATA;
+        return D3DXERR_INVALIDDATA;
 
     if (!(buffer = malloc(slice_pitch)))
         return E_OUTOFMEMORY;
