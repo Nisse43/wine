@@ -3037,20 +3037,28 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawSpriteBatch(ID2D1DeviceCont
 {
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
     struct d2d_sprite_batch *batch = unsafe_impl_from_ID2D1SpriteBatch(sprite_batch);
+    D2D1_ANTIALIAS_MODE old_mode;
+    D2D1_MATRIX_3X2_F prev_tr;
+    D2D1_RECT_F dst, src_rect_f;
+    UINT32 i;
 
     TRACE("iface %p, sprite_batch %p, start_index %u, sprite_count %u, bitmap %p, interpolation_mode %u,"
             "sprite_options %u.\n", iface, sprite_batch, start_index, sprite_count, bitmap,
             interpolation_mode, sprite_options);
 
-    if (context->drawing_state.antialiasMode != D2D1_ANTIALIAS_MODE_ALIASED)
-    {
-        d2d_device_context_set_error(context, D2DERR_WRONG_STATE);
+    /* NB: match the original LMU port's leniency here. D2D1 nominally requires
+     * ANTIALIAS_MODE_ALIASED and validates the range, but Le Mans Ultimate calls
+     * DrawSpriteBatch without setting aliased mode. Upstream's stub responds by
+     * calling d2d_device_context_set_error(), which poisons the device context and
+     * causes every later draw in the frame to be dropped (missing overlays / lost
+     * transparency). Force aliased mode locally and skip the error-setting checks. */
+    if (!batch)
         return;
-    }
 
-    if (start_index >= batch->sprite_count || sprite_count > batch->sprite_count - start_index)
+    if (start_index + sprite_count > batch->sprite_count)
     {
-        d2d_device_context_set_error(context, E_INVALIDARG);
+        WARN("start_index %u + sprite_count %u exceeds batch sprite_count %u.\n",
+                start_index, sprite_count, (unsigned int)batch->sprite_count);
         return;
     }
 
@@ -3058,11 +3066,43 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawSpriteBatch(ID2D1DeviceCont
     {
         d2d_command_list_draw_sprite_batch(context->target.command_list, sprite_batch,
                 start_index, sprite_count, bitmap, interpolation_mode, sprite_options);
+        return;
     }
-    else
+
+    if (context->target.type != D2D_TARGET_BITMAP || !bitmap)
     {
-        FIXME("Unimplemented for bitmap render target.\n");
+        FIXME("DrawSpriteBatch: unsupported target %#x or NULL bitmap.\n", context->target.type);
+        return;
     }
+
+    /* LMU: upstream only implements the command-list path above. Le Mans Ultimate
+     * renders its overlays (e.g. the RPM gauge and other transparency sprites) via
+     * sprite batches onto a bitmap target, so draw each sprite as a tinted bitmap
+     * blit into its destination rect, using the per-sprite colour (incl. alpha)
+     * through the DrawImage/shape-shader tint path. */
+    old_mode = d2d_device_context_GetAntialiasMode(iface);
+    d2d_device_context_SetAntialiasMode(iface, D2D1_ANTIALIAS_MODE_ALIASED);
+    for (i = start_index; i < start_index + sprite_count; ++i)
+    {
+        dst = batch->sprites[i].dest;
+
+        d2d_device_context_GetTransform(iface, &prev_tr);
+        d2d_device_context_SetTransform(iface, &batch->sprites[i].transform);
+
+        src_rect_f.left   = (FLOAT)batch->sprites[i].source.left;
+        src_rect_f.top    = (FLOAT)batch->sprites[i].source.top;
+        src_rect_f.right  = (FLOAT)batch->sprites[i].source.right;
+        src_rect_f.bottom = (FLOAT)batch->sprites[i].source.bottom;
+
+        context->target.bitmap->is_tinted = TRUE;
+        context->target.bitmap->tint_colour = batch->sprites[i].color;
+        d2d_device_context_DrawBitmap(iface, bitmap, &dst, batch->sprites[i].color.a,
+                interpolation_mode, &src_rect_f);
+        context->target.bitmap->is_tinted = FALSE;
+
+        d2d_device_context_SetTransform(iface, &prev_tr);
+    }
+    d2d_device_context_SetAntialiasMode(iface, old_mode);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateSvgGlyphStyle(ID2D1DeviceContext6 *iface,
